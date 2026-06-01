@@ -1,126 +1,116 @@
 # Creator Video RAG — Technical Assignment
 
-Full-stack RAG chatbot that ingests **one YouTube video (A)** and **one Instagram Reel (B)**, indexes transcripts + metadata in **ChromaDB**, and answers creator questions via **LangChain** with **streaming**, **source citations**, and **multi-turn memory**.
+Compare **one YouTube video (A)** and **one Instagram Reel (B)**: pull transcripts + metadata, index in **ChromaDB**, chat with **LangChain** (history-aware retriever + retrieval chain). Built for the engineering screening brief.
 
-## What it does
+**Repo:** https://github.com/VarshaPulikanti/technical_assignment
 
-1. Accepts two URLs (YouTube + Instagram — required platforms).
-2. Pulls **transcript** + **metadata** (views, likes, comments, creator, followers, hashtags, upload date, duration) using **yt-dlp** + **youtube-transcript-api**.
-3. Computes **engagement rate**: `(likes + comments) / views × 100`.
-4. Chunks transcripts, embeds with **OpenAI `text-embedding-3-small`**, stores in **ChromaDB** with `video_id` tags (`A` / `B`).
-5. **LangChain** retrieval chain with history-aware retriever — stream answers and cite chunk sources.
-6. **Next.js** UI: side-by-side video cards + chat with suggested prompts.
+## What I built
 
-## Stack choices (and why)
+| Requirement | How |
+|-------------|-----|
+| Two URLs (YT + IG), dynamic | `POST /api/ingest` → `yt-dlp` + `youtube-transcript-api` |
+| Metadata + transcript | views, likes, comments, creator, followers, hashtags, date, duration |
+| Engagement rate | `(likes + comments) / views × 100` in `video_fetcher.py` |
+| Chunk + embed + vector DB | ChromaDB, metadata `video_id` = `A` or `B` |
+| Hook (first ~5s) | Separate chunk with `source_type: hook` |
+| LangChain RAG | `create_history_aware_retriever` + `create_retrieval_chain` in `rag.py` |
+| Stream + cite + memory | NDJSON stream; sources from retriever; in-session `chat_history` |
+| Next.js UI | Side-by-side cards + chat (`CreatorApp.tsx`) |
 
-| Layer | Choice | Reasoning |
-|--------|--------|-----------|
-| Backend | **FastAPI** | Async streaming, simple NDJSON SSE-style responses, fast to ship. |
-| Orchestration | **LangChain** | Required; history-aware retriever + `create_retrieval_chain` covers memory + RAG without custom glue. |
-| Embeddings | **OpenAI text-embedding-3-small** | Cheap ($0.02/1M tokens), strong quality for short-form transcripts. At 1000 creators/day × ~2 videos × ~20 chunks ≈ 40k chunks/day — embedding cost stays in low tens of dollars vs larger models. |
-| Vector DB | **ChromaDB (local persist)** | Zero infra for demo; `video_id` in metadata filters mentally per chunk. **At scale (1000 creators/day):** move to **pgvector** on existing Postgres (one bill, SQL backups, tenant_id + session_id indexes) or **Pinecone serverless** if pure vector ops and auto-scale matter more than JOINs with billing tables. |
-| LLM | **gpt-4o-mini** | Best cost/quality for structured Q&A on small context; full **gpt-4o** only if you see systematic reasoning gaps in evals. |
-| Transcripts | **youtube-transcript-api** + **yt-dlp** subs | No Whisper GPU cost for most YT/IG public reels; fallback to auto-captions/description keeps pipeline dynamic. |
-| Frontend | **Next.js 15** | Client-side streaming parse of NDJSON; minimal deps = less lag. |
+## Stack (and why)
 
-### Chunk size: 500 / overlap 80
+- **FastAPI** — async ingest, background embedding, NDJSON chat stream.
+- **LangChain 0.3** — required orchestration; history-aware retriever so follow-ups like “compare *their* hooks” still retrieve the right chunks.
+- **ChromaDB (local)** — fine for demo and single-tenant; at **~1000 creators/day** I’d move embeddings to **pgvector** on Postgres (one bill, SQL backups, `tenant_id` + `session_id` indexes) or **Pinecone serverless** if we only need vector search without joins.
+- **Embeddings** — `text-embedding-3-small` (OpenAI) for production cost; **Ollama `mxbai-embed-large`** for free local demos.
+- **LLM** — `gpt-4o-mini` for best cost/quality on short Q&A; **Ollama `llama3.2`** when avoiding API spend (slower on CPU).
+- **Chunk size 500 / overlap 80** — short-form scripts are dense; smaller chunks help “first 5 seconds” and hook questions without blowing token budget.
 
-- Short-form scripts are dense; 500 chars ≈ 1–2 spoken sentences — good retrieval granularity for “first 5 seconds” hook questions (early chunks have low `chunk_index`).
-- 80 overlap avoids cutting mid-thought across chunk boundaries.
-- **Breaks at 10k users:** single-node Chroma + in-memory chat history. Fix: Redis session store + pgvector with `(session_id, video_id)` composite index.
+### Cost @ 1000 creators/day (rough)
 
-### Cost sketch @ 1000 creators/day
+~2 videos × ~20 chunks × 1000 sessions ≈ 40k embed calls/day → **~$1–2/day** on small embeddings. Chat dominates: ~5 turns × ~3k tokens × 1000 ≈ **$15–40/day** on gpt-4o-mini. Vectors are not the bottleneck — **LLM tokens are**. Mitigations: cache FAQ answers per session, batch nightly embeds, optional reranker on top-20 instead of raising `k`.
 
-Assume ~2 videos, ~15 transcript chunks + 1 metadata doc each → ~32 embed calls + ~5 chat turns × 8 retrieved chunks:
+### What breaks at scale
 
-- Embeddings: ~32 × 500 tokens × 1000 ≈ 16M tokens/day → **~$0.32/day** on small embedding model.
-- LLM: ~5 × 3k tokens in/out × 1000 ≈ **~$15–40/day** on mini (depends on answer length).
-- **Bottleneck isn’t vectors** — it’s LLM tokens. Cache metadata answers (“engagement rate of each”) keyed by `session_id` if users repeat FAQs.
-
-**Higher quality / lower cost alternative at scale:** batch embed nightly, serve hot sessions from Redis, use **reranker** (Cohere rerank or bge-reranker) on top-20 instead of bigger k — improves citation precision without larger LLM.
-
-## Prerequisites
-
-- Python 3.11+
-- Node 18+
-- OpenAI API key
-- Public YouTube + Instagram Reel URLs (Instagram may need logged-in cookies for some reels — see below)
+- In-memory chat history and per-session Chroma collections on one machine.
+- Instagram view counts often need cookies (`YTDLP_COOKIES_FILE`).
+- Ollama on a laptop OOMs if you run embed + chat + multiple tabs — use OpenAI for the Loom or restart Ollama between ingest and chat.
 
 ## Setup
 
-```bash
-# Backend
+```powershell
+# 1) Backend
 cd backend
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+.\.venv\Scripts\activate
 pip install -r requirements.txt
-copy ..\.env.example .env       # add OPENAI_API_KEY
-uvicorn app.main:app --reload --port 8000
+copy ..\.env.example .env
+# Edit backend\.env — set OPENAI_API_KEY (recommended for demo) OR ollama providers
 
-# Frontend (new terminal)
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+# Do NOT use --reload while indexing (kills background embed jobs)
+
+# 2) Frontend
 cd frontend
 npm install
-echo NEXT_PUBLIC_API_URL=http://localhost:8000 > .env.local
+# frontend\.env.local: NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev
 ```
 
-Open http://localhost:3000
+Open http://localhost:3000 → paste **YouTube** + **Instagram Reel** URLs → **Analyze & Index** → wait for “ready” → chat.
+
+**Ollama (free):** install Ollama app, `ollama pull llama3.2`, `ollama pull mxbai-embed-large`, set `LLM_PROVIDER=ollama` and `EMBEDDING_PROVIDER=ollama` in `backend/.env`.
 
 ## API
 
-- `POST /api/ingest` — `{ "youtube_url": "...", "instagram_url": "..." }` → session_id + video stats + chunk count
-- `POST /api/chat` — NDJSON stream: `sources` → `token`* → `done`
-- `GET /health`
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/ingest` | Fetch both videos; index in background |
+| `GET /api/ingest/status/{session_id}` | Poll until `chat_ready` |
+| `POST /api/chat` | NDJSON: `status` → `sources` → `token`* → `done` |
+| `GET /api/config` | Active LLM/embedding provider |
+| `GET /api/ollama-health` | Ollama reachability check |
+| `GET /health` | Liveness |
 
-## Instagram notes
+## Loom demo script (live, start to finish)
 
-yt-dlp works for many public Reels. If metadata/transcript is empty:
+1. Start backend + frontend; show `.env` provider (OpenAI or Ollama).
+2. Paste two **real** public URLs (YouTube + IG Reel).
+3. **Analyze & Index** — show side-by-side cards (stats, engagement, thumbnails).
+4. Ask all five suggested questions; point at **streaming** text and **source chips** (video A/B + chunk).
+5. **Follow-up** without re-stating context (e.g. “What should B change about the hook?”) → shows **memory**.
+6. 60s on scale: Chroma → pgvector, mini vs 4o, embed batching, IG cookies.
 
-- Update yt-dlp: `pip install -U yt-dlp`
-- Optional: export `INSTAGRAM_COOKIES` via browser cookies file (documented in yt-dlp wiki)
-
-## Demo script (Loom)
-
-1. Start backend + frontend.
-2. Paste real YouTube + Instagram URLs.
-3. Click **Analyze & Index** — show cards updating with live stats.
-4. Ask each suggested question; show streaming + source citations.
-5. Ask a **follow-up** (“elaborate on B’s hook”) to show **memory**.
-6. Explain scale/cost trade-offs from this README.
-
-## Project structure
+## Project layout
 
 ```
 assignment/
-├── backend/
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── config.py
-│   │   └── services/
-│   │       ├── video_fetcher.py
-│   │       ├── vector_store.py
-│   │       └── rag.py
-│   └── requirements.txt
-├── frontend/
-│   └── app/page.tsx
+├── backend/app/
+│   ├── main.py
+│   ├── config.py
+│   └── services/
+│       ├── video_fetcher.py   # ingest + engagement
+│       ├── vector_store.py    # Chroma + chunk tags
+│       └── rag.py             # LangChain retrieval chain
+├── frontend/app/CreatorApp.tsx
 ├── .env.example
 └── README.md
 ```
 
-## Assignment checklist
+## Assignment checklist (self-review)
 
-| Requirement | Status |
-|-------------|--------|
-| YouTube + Instagram URLs (dynamic ingest) | Yes |
-| Transcript + full metadata | yt-dlp + youtube-transcript-api |
-| Engagement rate `(likes+comments)/views×100` | Computed server-side |
-| Chunk + embed + vector DB with `video_id` A/B | ChromaDB |
-| LangChain RAG + 5 question types | Suggested prompts in UI |
-| Stream + cite sources + memory | NDJSON stream, chunk citations, history-aware retriever |
-| Next.js side-by-side cards + chat | Yes |
-| README + `.env.example` + multiple commits | Yes |
-
-**Install tip (Windows):** `cd backend; .\install.ps1` if `pip install -r requirements.txt` conflicts.
+| Item | Done |
+|------|------|
+| Full-stack, dynamic (no hard-coded answers) | Yes |
+| LangChain + embeddings + ChromaDB | Yes (`rag.py`, `vector_store.py`) |
+| YouTube + Instagram mandatory | Enforced in `main.py` |
+| Transcript + full metadata | Yes |
+| Engagement rate formula | Yes |
+| Chunks tagged `video_id` A/B | Yes |
+| Stream + cite + memory | Yes |
+| Next.js cards + chat | Yes |
+| README + `.env.example` + git history | Yes |
+| Loom + GitHub submission | **You** record Loom and reply with URLs |
 
 ## Author
 
