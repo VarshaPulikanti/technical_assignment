@@ -1,0 +1,26 @@
+# env & secrets
+.env
+.env.local
+*.pem
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/.chroma/
+backend/data/
+
+# node
+node_modules/
+frontend/.next/
+frontend/out/
+*.log
+
+# os
+.DS_Store
+Thumbs.db
+
+# ide
+.idea/
+.vscode/
