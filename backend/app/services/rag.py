@@ -1,7 +1,8 @@
-"""LangChain RAG: history-aware retriever + retrieval chain, streaming + memory."""
+"""LangChain RAG: retrieval chain, streaming, citations, session memory."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import AsyncGenerator
 
@@ -16,14 +17,11 @@ from app.services.llm_factory import get_chat_llm
 from app.services.vector_store import get_vectorstore
 
 _session_histories: dict[str, list] = {}
+_CHAT_TIMEOUT_SEC = 180
 
 CONTEXTUALIZE_PROMPT = ChatPromptTemplate.from_messages(
     [
-        (
-            "system",
-            "Given chat history and the latest user question, rewrite it as a standalone "
-            "search query for video transcripts. Do not answer — only output the query.",
-        ),
+        ("system", "Rewrite the question as a standalone search query. Output only the query."),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
     ]
@@ -31,9 +29,9 @@ CONTEXTUALIZE_PROMPT = ChatPromptTemplate.from_messages(
 
 QA_SYSTEM = """You are a creator analytics assistant comparing Video A (YouTube) and Video B (Instagram).
 
-Use ONLY the retrieved context below. Cite sources as [Video A, chunk N], [Video B, hook], or [Video B, metadata].
-Compute engagement rate as (likes + comments) / views × 100 when views are available.
-If Instagram views are hidden, say so — never invent view counts.
+Use ONLY the context below. Cite [Video A, chunk N] or [Video B, hook/metadata].
+Engagement rate = (likes + comments) / views × 100 when views exist.
+If Instagram views are hidden, say so.
 
 Context:
 {context}"""
@@ -71,79 +69,97 @@ def clear_history(session_id: str) -> None:
 
 
 def _build_rag_chain(session_id: str):
-    """LangChain: history-aware retriever + stuff-documents QA chain."""
-    retriever = get_vectorstore(session_id).as_retriever(search_kwargs={"k": 6})
+    use_ollama = settings.llm_provider.lower() == "ollama"
+    k = 4 if use_ollama else 6
+    retriever = get_vectorstore(session_id).as_retriever(search_kwargs={"k": k})
     llm = get_chat_llm()
-    history_aware_retriever = create_history_aware_retriever(
-        llm, retriever, CONTEXTUALIZE_PROMPT
-    )
     qa_chain = create_stuff_documents_chain(llm, QA_PROMPT)
-    return create_retrieval_chain(history_aware_retriever, qa_chain)
+
+    if use_ollama:
+        return create_retrieval_chain(retriever, qa_chain)
+
+    history_aware = create_history_aware_retriever(llm, retriever, CONTEXTUALIZE_PROMPT)
+    return create_retrieval_chain(history_aware, qa_chain)
+
+
+async def _run_chain(chain, inputs: dict) -> tuple[str, list]:
+    """Run retrieval chain with timeout; return (answer, context docs)."""
+    full_answer = ""
+    context_docs: list = []
+
+    async def _consume():
+        nonlocal full_answer, context_docs
+        async for chunk in chain.astream(inputs):
+            if chunk.get("context"):
+                context_docs = chunk["context"]
+            if chunk.get("answer"):
+                ans = chunk["answer"]
+                text = ans if isinstance(ans, str) else getattr(ans, "content", "") or ""
+                full_answer += text
+        if not full_answer.strip():
+            result = await chain.ainvoke(inputs)
+            context_docs = result.get("context") or context_docs
+            answer = result.get("answer", "")
+            full_answer = answer.content if hasattr(answer, "content") else str(answer)
+
+    await asyncio.wait_for(_consume(), timeout=_CHAT_TIMEOUT_SEC)
+    return full_answer, context_docs
 
 
 async def stream_chat(session_id: str, message: str) -> AsyncGenerator[str, None]:
-    yield json.dumps({"type": "status", "content": "Retrieving relevant chunks (LangChain)…"}) + "\n"
-
-    chain = _build_rag_chain(session_id)
     history = _get_history(session_id)
     inputs = {"input": message, "chat_history": history}
+    use_ollama = settings.llm_provider.lower() == "ollama"
 
-    sources_sent = False
-    full_answer = ""
-
-    provider = settings.llm_provider.lower()
-    gen_msg = (
-        "Generating answer (Ollama on CPU may take 1–2 min)…"
-        if provider == "ollama"
-        else "Generating answer…"
-    )
-    yield json.dumps({"type": "status", "content": gen_msg}) + "\n"
+    yield json.dumps({"type": "status", "content": "Searching transcripts…"}) + "\n"
 
     try:
-        async for chunk in chain.astream(inputs):
-            if "context" in chunk and chunk["context"] and not sources_sent:
-                yield json.dumps(
-                    {"type": "sources", "sources": _docs_to_sources(chunk["context"])}
-                ) + "\n"
-                sources_sent = True
+        chain = _build_rag_chain(session_id)
+    except Exception as e:
+        yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+        return
 
-            if "answer" in chunk and chunk["answer"]:
-                ans = chunk["answer"]
-                text = ans if isinstance(ans, str) else getattr(ans, "content", "") or ""
-                if text:
-                    full_answer += text
-                    yield json.dumps({"type": "token", "content": text}) + "\n"
+    wait = (
+        "Ollama generating (30–120 sec). Quit other Ollama apps if stuck; send once only."
+        if use_ollama
+        else "Generating answer…"
+    )
+    yield json.dumps({"type": "status", "content": wait}) + "\n"
 
-        if not full_answer.strip():
-            result = await chain.ainvoke(inputs)
-            if not sources_sent and result.get("context"):
-                yield json.dumps(
-                    {"type": "sources", "sources": _docs_to_sources(result["context"])}
-                ) + "\n"
-                sources_sent = True
-            answer = result.get("answer", "")
-            text = answer.content if hasattr(answer, "content") else str(answer)
-            if text:
-                full_answer = text
-                yield json.dumps({"type": "token", "content": text}) + "\n"
+    try:
+        full_answer, context_docs = await _run_chain(chain, inputs)
+        if context_docs:
+            yield json.dumps({"type": "sources", "sources": _docs_to_sources(context_docs)}) + "\n"
+        if full_answer.strip():
+            yield json.dumps({"type": "token", "content": full_answer}) + "\n"
+        else:
+            yield json.dumps(
+                {
+                    "type": "token",
+                    "content": "No answer from the model. Restart Ollama (tray → Quit → reopen).",
+                }
+            ) + "\n"
 
+    except asyncio.TimeoutError:
+        yield json.dumps(
+            {
+                "type": "error",
+                "message": "Chat timed out after 3 min. Restart Ollama and the backend, then try again.",
+            }
+        ) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+        return
     except Exception as e:
         err = str(e)
-        if "allocate" in err.lower() or "terminated" in err.lower():
-            err = (
-                "Ollama ran out of memory. Quit Ollama from the tray, reopen it, "
-                "restart the backend, then send one message at a time."
-            )
+        if "429" in err or "quota" in err.lower():
+            err = "OpenAI quota exceeded. Use Ollama in backend/.env or add billing."
+        elif "allocate" in err.lower() or "terminated" in err.lower():
+            err = "Ollama out of memory — Quit Ollama from system tray, reopen, retry."
         yield json.dumps({"type": "error", "message": err}) + "\n"
         yield json.dumps({"type": "done"}) + "\n"
         return
 
-    if not full_answer.strip():
-        full_answer = (
-            "No LLM response. Check Ollama/OpenAI is running and the session is indexed."
-        )
-        yield json.dumps({"type": "token", "content": full_answer}) + "\n"
-
     history.append(HumanMessage(content=message))
-    history.append(AIMessage(content=full_answer))
+    history.append(AIMessage(content=full_answer or ""))
     yield json.dumps({"type": "done"}) + "\n"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -127,6 +127,26 @@ export default function CreatorApp() {
   const [streaming, setStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const h = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(4000) });
+        if (!h.ok) setStatus("Backend not OK — start uvicorn on port 8000.");
+        if (h.ok) {
+          const cfg = await fetch(`${API_BASE}/api/config`).then((r) => r.json());
+          if (cfg.llm_provider === "ollama") {
+            const oh = await fetch(`${API_BASE}/api/ollama-health`).then((r) => r.json());
+            if (!oh.ok) {
+              setStatus(oh.hint || oh.error || "Ollama not ready — open Ollama app and pull llama3.2");
+            }
+          }
+        }
+      } catch {
+        setStatus("Cannot reach API at " + API_BASE + " — start the backend first.");
+      }
+    })();
+  }, []);
+
   const pollIndexStatus = useCallback(async (sid: string) => {
     for (let i = 0; i < 200; i++) {
       await new Promise((r) => setTimeout(r, 3000));
@@ -193,7 +213,7 @@ export default function CreatorApp() {
             if (prev) setStatus("Try chat now — indexing should be finished.");
             return false;
           });
-        }, 2 * 60 * 1000);
+        }, 90 * 1000);
       } else {
         setStatus(`Indexed ${data.chunk_count} chunks. Session: ${data.session_id}`);
       }

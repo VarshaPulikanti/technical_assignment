@@ -1,16 +1,6 @@
 "use client";
 
-import dynamic from "next/dynamic";
-
-const CreatorApp = dynamic(() => import("./CreatorApp"), {
-  ssr: false,
-  loading: () => (
-    <main>
-      <h1>Creator Video Compare</h1>
-      <p className="subtitle">Loading…</p>
-    </main>
-  ),
-});
+import CreatorApp from "./CreatorApp";
 
 export default function Page() {
   return <CreatorApp />;
