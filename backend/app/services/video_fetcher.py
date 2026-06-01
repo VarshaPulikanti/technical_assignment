@@ -8,6 +8,8 @@ from typing import Any
 
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi
+
+from app.config import settings
 from youtube_transcript_api._errors import (
     NoTranscriptFound,
     TranscriptsDisabled,
@@ -31,6 +33,8 @@ class VideoMetadata:
     duration_seconds: int
     engagement_rate: float
     transcript: str
+    hook_opening: str  # first ~5 seconds for hook comparison queries
+    thumbnail_url: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,34 +67,47 @@ def _parse_hashtags(description: str, tags: list[str] | None) -> list[str]:
 
 
 def _fetch_ytdlp_info(url: str) -> dict[str, Any]:
-    opts = {
+    opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "extract_flat": False,
     }
+    if settings.ytdlp_cookies_file:
+        opts["cookiefile"] = settings.ytdlp_cookies_file
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
 
 
-def _youtube_transcript(yt_id: str) -> str:
+def _snippets_from_youtube(yt_id: str) -> list[dict[str, Any]]:
     try:
-        snippets = YouTubeTranscriptApi.get_transcript(yt_id, languages=["en", "en-US", "en-GB"])
-        return " ".join(s["text"].strip() for s in snippets if s.get("text"))
+        return YouTubeTranscriptApi.get_transcript(yt_id, languages=["en", "en-US", "en-GB"])
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
         pass
-
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(yt_id)
         for t in transcript_list:
             try:
-                snippets = t.fetch()
-                return " ".join(s["text"].strip() for s in snippets if s.get("text"))
+                return list(t.fetch())
             except Exception:
                 continue
     except Exception:
         pass
-    return ""
+    return []
+
+
+def _youtube_transcript(yt_id: str) -> tuple[str, str]:
+    """Return (full_transcript, first_5_seconds_hook)."""
+    snippets = _snippets_from_youtube(yt_id)
+    if not snippets:
+        return "", ""
+    full = " ".join(s["text"].strip() for s in snippets if s.get("text"))
+    hook = " ".join(
+        s["text"].strip()
+        for s in snippets
+        if s.get("text") and float(s.get("start", 0)) < 5.0
+    )
+    return full, hook
 
 
 def _subtitle_text_from_info(info: dict[str, Any]) -> str:
@@ -157,17 +174,29 @@ def fetch_video(url: str, video_id: str) -> VideoMetadata:
     follower_count = info.get("channel_follower_count") or info.get("follower_count")
 
     transcript = ""
+    hook_opening = ""
     if platform == "youtube":
         yt_id = _extract_youtube_id(url) or info.get("id", "")
         if yt_id:
-            transcript = _youtube_transcript(yt_id)
+            transcript, hook_opening = _youtube_transcript(yt_id)
     if not transcript:
         transcript = _subtitle_text_from_info(info)
     if not transcript and description:
-        # last resort for reels with thin metadata
         transcript = description[:8000]
 
+    if not hook_opening and transcript:
+        # estimate opening from duration when timestamps unavailable (IG, captions)
+        dur = max(duration, 1)
+        take = max(80, int(len(transcript) * min(5.0, dur) / dur))
+        hook_opening = transcript[:take].strip()
+
     engagement = compute_engagement_rate(views, likes, comments)
+
+    thumbnail_url = info.get("thumbnail")
+    if not thumbnail_url:
+        thumbs = info.get("thumbnails")
+        if isinstance(thumbs, list) and thumbs:
+            thumbnail_url = thumbs[-1].get("url")
 
     return VideoMetadata(
         video_id=video_id,
@@ -184,4 +213,6 @@ def fetch_video(url: str, video_id: str) -> VideoMetadata:
         duration_seconds=duration,
         engagement_rate=engagement,
         transcript=transcript.strip(),
+        hook_opening=hook_opening.strip(),
+        thumbnail_url=thumbnail_url,
     )

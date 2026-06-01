@@ -14,6 +14,7 @@ from app.services.video_fetcher import VideoMetadata
 
 
 COLLECTION_NAME = "video_transcripts"
+_active_sessions: set[str] = set()
 
 
 def _metadata_doc_block(meta: VideoMetadata) -> str:
@@ -45,6 +46,20 @@ def build_documents(videos: list[VideoMetadata]) -> list[Document]:
                 },
             )
         )
+        if v.hook_opening:
+            docs.append(
+                Document(
+                    page_content=f"[HOOK first 5 seconds — video_id={v.video_id}]\n{v.hook_opening}",
+                    metadata={
+                        "video_id": v.video_id,
+                        "chunk_index": 0,
+                        "source_type": "hook",
+                        "url": v.url,
+                        "platform": v.platform,
+                        "title": v.title,
+                    },
+                )
+            )
         if v.transcript:
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=settings.chunk_size,
@@ -91,12 +106,23 @@ def ingest_videos(videos: list[VideoMetadata], session_id: str) -> dict[str, Any
         collection_name=collection,
         persist_directory=settings.chroma_persist_dir,
     )
+    _active_sessions.add(session_id)
     return {
         "session_id": session_id,
         "collection": collection,
         "chunk_count": len(docs),
         "videos": [v.to_dict() for v in videos],
     }
+
+
+def session_exists(session_id: str) -> bool:
+    if session_id in _active_sessions:
+        return True
+    try:
+        data = get_vectorstore(session_id).get()
+        return bool(data.get("ids"))
+    except Exception:
+        return False
 
 
 def get_vectorstore(session_id: str) -> Chroma:

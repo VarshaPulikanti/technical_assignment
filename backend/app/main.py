@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from app.config import settings
 from app.services import rag
 from app.services.video_fetcher import fetch_video
-from app.services.vector_store import ingest_videos
+from app.services.vector_store import ingest_videos, session_exists
 
 app = FastAPI(title="Creator RAG Compare", version="1.0.0")
 
@@ -72,6 +72,8 @@ def ingest(body: IngestRequest) -> dict[str, Any]:
 async def chat(body: ChatRequest):
     if not settings.openai_api_key:
         raise HTTPException(500, "OPENAI_API_KEY not configured")
+    if not session_exists(body.session_id):
+        raise HTTPException(404, f"Unknown session '{body.session_id}'. Run /api/ingest first.")
 
     async def event_gen():
         try:

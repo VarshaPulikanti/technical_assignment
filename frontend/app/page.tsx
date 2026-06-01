@@ -18,6 +18,7 @@ type VideoMeta = {
   upload_date: string;
   duration_seconds: number;
   engagement_rate: number;
+  thumbnail_url?: string | null;
 };
 
 type Source = {
@@ -54,6 +55,16 @@ function VideoCard({ v }: { v: VideoMeta }) {
     <div className={`video-card ${isA ? "a" : "b"}`}>
       <span className="badge">Video {v.video_id}</span>
       <span className="badge">{v.platform}</span>
+      {v.thumbnail_url && (
+        <img
+          src={v.thumbnail_url}
+          alt=""
+          width={320}
+          height={180}
+          loading="lazy"
+          style={{ width: "100%", maxHeight: 140, objectFit: "cover", borderRadius: 8, marginBottom: 8 }}
+        />
+      )}
       <h3>{v.title}</h3>
       <div className="stat-row">
         <span>
@@ -270,7 +281,8 @@ export default function Home() {
                 <ul className="sources">
                   {m.sources.map((s, j) => (
                     <li key={j}>
-                      [{s.video_id}] {s.source_type} chunk {s.chunk_index}: {s.excerpt}…
+                      [Video {s.video_id}] {s.source_type}
+                      {s.chunk_index >= 0 ? ` · chunk ${s.chunk_index}` : ""}: {s.excerpt}…
                     </li>
                   ))}
                 </ul>

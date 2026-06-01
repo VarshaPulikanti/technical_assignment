@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 80
     cors_origins: str = "http://localhost:3000"
+    # Optional: path to Netscape cookies.txt for Instagram (yt-dlp)
+    ytdlp_cookies_file: str = ""
 
 
 settings = Settings()

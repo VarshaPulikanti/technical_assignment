@@ -107,6 +107,21 @@ assignment/
 └── README.md
 ```
 
+## Assignment checklist
+
+| Requirement | Status |
+|-------------|--------|
+| YouTube + Instagram URLs (dynamic ingest) | Yes |
+| Transcript + full metadata | yt-dlp + youtube-transcript-api |
+| Engagement rate `(likes+comments)/views×100` | Computed server-side |
+| Chunk + embed + vector DB with `video_id` A/B | ChromaDB |
+| LangChain RAG + 5 question types | Suggested prompts in UI |
+| Stream + cite sources + memory | NDJSON stream, chunk citations, history-aware retriever |
+| Next.js side-by-side cards + chat | Yes |
+| README + `.env.example` + multiple commits | Yes |
+
+**Install tip (Windows):** `cd backend; .\install.ps1` if `pip install -r requirements.txt` conflicts.
+
 ## Author
 
 Varsha Pulikanti — technical screening submission.

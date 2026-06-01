@@ -31,12 +31,17 @@ When answering:
 If context is insufficient, say what is missing — do not invent stats."""
 
 
-def _format_doc(doc) -> str:
-    m = doc.metadata or {}
-    vid = m.get("video_id", "?")
-    idx = m.get("chunk_index", "?")
-    st = m.get("source_type", "transcript")
-    return f"[{vid} | {st} | chunk {idx}]\n{doc.page_content}"
+def _docs_to_sources(docs) -> list[dict]:
+    return [
+        {
+            "video_id": d.metadata.get("video_id"),
+            "chunk_index": d.metadata.get("chunk_index"),
+            "source_type": d.metadata.get("source_type"),
+            "title": d.metadata.get("title"),
+            "excerpt": (d.page_content or "")[:200],
+        }
+        for d in (docs or [])
+    ]
 
 
 def _get_history(session_id: str) -> list:
@@ -82,26 +87,22 @@ async def stream_chat(session_id: str, message: str) -> AsyncGenerator[str, None
     chain = _build_chain(session_id)
     history = _get_history(session_id)
 
-    store = get_vectorstore(session_id)
-    retrieved = store.similarity_search(message, k=8)
-    sources = [
-        {
-            "video_id": d.metadata.get("video_id"),
-            "chunk_index": d.metadata.get("chunk_index"),
-            "source_type": d.metadata.get("source_type"),
-            "title": d.metadata.get("title"),
-            "excerpt": (d.page_content or "")[:200],
-        }
-        for d in retrieved
-    ]
-    yield json.dumps({"type": "sources", "sources": sources}) + "\n"
+    # preview sources while model streams (final list may refine after retrieval)
+    preview = _docs_to_sources(get_vectorstore(session_id).similarity_search(message, k=8))
+    yield json.dumps({"type": "sources", "sources": preview}) + "\n"
 
     full_answer = ""
+    context_docs = []
+
     async for event in chain.astream_events(
         {"input": message, "chat_history": history},
         version="v2",
     ):
         kind = event.get("event")
+        if kind == "on_retriever_end":
+            output = event.get("data", {}).get("output")
+            if output:
+                context_docs = output if isinstance(output, list) else getattr(output, "documents", output)
         if kind == "on_chat_model_stream":
             chunk = event.get("data", {}).get("chunk")
             if chunk and getattr(chunk, "content", None):
@@ -113,8 +114,12 @@ async def stream_chat(session_id: str, message: str) -> AsyncGenerator[str, None
     if not full_answer:
         result = await chain.ainvoke({"input": message, "chat_history": history})
         full_answer = result.get("answer", "")
+        context_docs = result.get("context") or context_docs
         if full_answer:
             yield json.dumps({"type": "token", "content": full_answer}) + "\n"
+
+    final_sources = _docs_to_sources(context_docs) or preview
+    yield json.dumps({"type": "sources", "sources": final_sources}) + "\n"
 
     history.append(HumanMessage(content=message))
     history.append(AIMessage(content=full_answer))
