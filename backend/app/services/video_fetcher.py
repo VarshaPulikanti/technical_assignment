@@ -79,16 +79,23 @@ def _fetch_ytdlp_info(url: str) -> dict[str, Any]:
         return ydl.extract_info(url, download=False)
 
 
+def _snippet_dicts(fetched) -> list[dict[str, Any]]:
+    """Normalize youtube-transcript-api 1.x FetchedTranscript to {text, start}."""
+    return [{"text": s.text, "start": s.start} for s in fetched]
+
+
 def _snippets_from_youtube(yt_id: str) -> list[dict[str, Any]]:
+    """youtube-transcript-api 1.x uses instance methods fetch() / list()."""
+    api = YouTubeTranscriptApi()
+    langs = ["en", "en-US", "en-GB"]
     try:
-        return YouTubeTranscriptApi.get_transcript(yt_id, languages=["en", "en-US", "en-GB"])
+        return _snippet_dicts(api.fetch(yt_id, languages=langs))
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable):
         pass
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(yt_id)
-        for t in transcript_list:
+        for transcript in api.list(yt_id):
             try:
-                return list(t.fetch())
+                return _snippet_dicts(transcript.fetch())
             except Exception:
                 continue
     except Exception:
