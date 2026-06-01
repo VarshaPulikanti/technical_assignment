@@ -1,2 +1,3 @@
 # Run from backend/ with venv activated
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# No --reload: reload crashes if code changes during ingest
+uvicorn app.main:app --host 127.0.0.1 --port 8000

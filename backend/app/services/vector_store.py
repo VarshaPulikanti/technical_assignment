@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_community.vectorstores import Chroma
-from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
 from app.config import settings
+from app.services.llm_factory import get_embeddings
 from app.services.video_fetcher import VideoMetadata
 
 
@@ -23,8 +23,10 @@ def _metadata_doc_block(meta: VideoMetadata) -> str:
         f"Title: {meta.title}\n"
         f"Creator: {meta.creator}\n"
         f"Followers: {meta.follower_count}\n"
-        f"Views: {meta.views} | Likes: {meta.likes} | Comments: {meta.comments}\n"
-        f"Engagement rate: {meta.engagement_rate}%\n"
+        f"Views: {meta.views if meta.views > 0 else 'not available (Instagram may hide views)'} | "
+        f"Likes: {meta.likes} | Comments: {meta.comments}\n"
+        f"Engagement rate: {meta.engagement_rate}%"
+        f"{'' if meta.views > 0 else ' (N/A when views hidden)'}\n"
         f"Upload date: {meta.upload_date} | Duration: {meta.duration_seconds}s\n"
         f"Hashtags: {', '.join(meta.hashtags)}\n"
     )
@@ -66,13 +68,16 @@ def build_documents(videos: list[VideoMetadata]) -> list[Document]:
                 chunk_overlap=settings.chunk_overlap,
             )
             chunks = splitter.split_text(v.transcript)
+            if len(chunks) > settings.max_chunks_per_video:
+                chunks = chunks[: settings.max_chunks_per_video]
+            start_idx = 1 if v.hook_opening else 0
             for i, chunk in enumerate(chunks):
                 docs.append(
                     Document(
                         page_content=chunk,
                         metadata={
                             "video_id": v.video_id,
-                            "chunk_index": i,
+                            "chunk_index": i + start_idx,
                             "source_type": "transcript",
                             "url": v.url,
                             "platform": v.platform,
@@ -81,13 +86,6 @@ def build_documents(videos: list[VideoMetadata]) -> list[Document]:
                     )
                 )
     return docs
-
-
-def get_embeddings() -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(
-        model=settings.embedding_model,
-        api_key=settings.openai_api_key or None,
-    )
 
 
 def ingest_videos(videos: list[VideoMetadata], session_id: str) -> dict[str, Any]:

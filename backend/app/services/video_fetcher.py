@@ -79,6 +79,33 @@ def _fetch_ytdlp_info(url: str) -> dict[str, Any]:
         return ydl.extract_info(url, download=False)
 
 
+def _pick_views(info: dict[str, Any]) -> int:
+    """Instagram often omits view_count unless logged-in cookies are provided."""
+    for key in ("view_count", "play_count", "impression_count"):
+        val = info.get(key)
+        if val is not None:
+            try:
+                n = int(val)
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
+def _pick_thumbnail(info: dict[str, Any]) -> str | None:
+    thumb = info.get("thumbnail")
+    if thumb:
+        return str(thumb)
+    thumbs = info.get("thumbnails")
+    if isinstance(thumbs, list) and thumbs:
+        # prefer larger thumb entries
+        for t in reversed(thumbs):
+            if t.get("url"):
+                return str(t["url"])
+    return None
+
+
 def _snippet_dicts(fetched) -> list[dict[str, Any]]:
     """Normalize youtube-transcript-api 1.x FetchedTranscript to {text, start}."""
     return [{"text": s.text, "start": s.start} for s in fetched]
@@ -159,7 +186,7 @@ def fetch_video(url: str, video_id: str) -> VideoMetadata:
     platform = _detect_platform(url)
     info = _fetch_ytdlp_info(url)
 
-    views = int(info.get("view_count") or 0)
+    views = _pick_views(info)
     likes = int(info.get("like_count") or 0)
     comments = int(info.get("comment_count") or 0)
     duration = int(info.get("duration") or 0)
@@ -199,11 +226,7 @@ def fetch_video(url: str, video_id: str) -> VideoMetadata:
 
     engagement = compute_engagement_rate(views, likes, comments)
 
-    thumbnail_url = info.get("thumbnail")
-    if not thumbnail_url:
-        thumbs = info.get("thumbnails")
-        if isinstance(thumbs, list) and thumbs:
-            thumbnail_url = thumbs[-1].get("url")
+    thumbnail_url = _pick_thumbnail(info)
 
     return VideoMetadata(
         video_id=video_id,

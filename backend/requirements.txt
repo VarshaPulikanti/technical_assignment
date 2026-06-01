@@ -5,6 +5,7 @@ pydantic-settings>=2.0.0
 httpx>=0.27.0
 yt-dlp>=2024.12.0
 youtube-transcript-api>=1.0.0
+langchain-core>=0.3.86,<1.0.0
 langchain==0.3.27
 langchain-openai==0.3.35
 langchain-community==0.3.31
