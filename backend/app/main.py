@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, HttpUrl
 
 from app.config import settings
 from app.services import rag
-from app.services.llm_factory import assert_providers_configured
+from app.services.llm_factory import assert_embeddings_ready, assert_providers_configured
 from app.services.video_fetcher import VideoMetadata, fetch_video
 from app.services.vector_store import ingest_videos, session_exists
 
@@ -117,7 +117,13 @@ def _index_in_background(videos: list[VideoMetadata], session_id: str) -> None:
         logger.info("Session %s ready — %s chunks indexed", session_id, result["chunk_count"])
     except Exception as e:
         logger.exception("Indexing failed for %s", session_id)
-        _index_status[session_id] = f"error: {e}"
+        msg = str(e)
+        if "11434" in msg or "Connection refused" in msg or "Failed to establish" in msg:
+            msg = (
+                "Embeddings failed: Ollama not running. Set EMBEDDING_PROVIDER=local in "
+                "backend/.env and restart backend — or open the Ollama app."
+            )
+        _index_status[session_id] = f"error: {msg}"
 
 
 @app.get("/api/ingest/status/{session_id}")
@@ -136,9 +142,11 @@ def ingest_status(session_id: str) -> dict[str, Any]:
 @app.post("/api/ingest")
 def ingest(body: IngestRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     try:
-        assert_providers_configured()
+        assert_embeddings_ready()
     except ValueError as e:
         raise HTTPException(500, str(e)) from e
+    except ConnectionError as e:
+        raise HTTPException(503, str(e)) from e
 
     session_id = str(uuid.uuid4())[:12]
     logger.info("Fetching videos for session %s…", session_id)
@@ -172,6 +180,8 @@ async def chat(body: ChatRequest):
         assert_providers_configured()
     except ValueError as e:
         raise HTTPException(500, str(e)) from e
+    except ConnectionError as e:
+        raise HTTPException(503, str(e)) from e
     st = _index_status.get(body.session_id)
     if st == "indexing":
         raise HTTPException(409, "Still indexing — wait until status is ready.")
