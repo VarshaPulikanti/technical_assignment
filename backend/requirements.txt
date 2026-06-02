@@ -9,6 +9,7 @@ langchain-core>=0.3.86,<1.0.0
 langchain==0.3.27
 langchain-openai==0.3.35
 langchain-community==0.3.31
+langchain-google-genai>=2.0.0,<3.0.0  # do NOT pip install latest (4.x breaks langchain 0.3)
 langchain-text-splitters==0.3.11
 chromadb>=0.5.23
 tiktoken>=0.7.0
