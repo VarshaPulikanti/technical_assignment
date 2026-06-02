@@ -18,7 +18,7 @@ from app.config import settings
 from app.services import rag
 from app.services.llm_factory import assert_embeddings_ready, assert_providers_configured
 from app.services.video_fetcher import VideoMetadata, fetch_video
-from app.services.vector_store import ingest_videos, session_exists
+from app.services.vector_store import delete_session_collection, ingest_videos, session_exists
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -208,4 +208,6 @@ async def chat(body: ChatRequest):
 @app.delete("/api/session/{session_id}")
 def reset_session(session_id: str) -> dict[str, str]:
     rag.clear_history(session_id)
-    return {"status": "cleared"}
+    delete_session_collection(session_id)
+    _index_status.pop(session_id, None)
+    return {"status": "cleared", "hint": "Click Analyze & Index again to rebuild search."}

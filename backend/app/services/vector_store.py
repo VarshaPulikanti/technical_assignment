@@ -1,20 +1,41 @@
-"""Chunk transcripts, embed with OpenAI, persist in ChromaDB tagged by video_id."""
+"""Chunk transcripts, embed, persist in ChromaDB tagged by video_id."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+import chromadb
 from langchain_community.vectorstores import Chroma
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.config import settings
 from app.services.llm_factory import get_embeddings
 from app.services.video_fetcher import VideoMetadata
 
+logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "video_transcripts"
 _active_sessions: set[str] = set()
+
+
+def _collection_name(session_id: str) -> str:
+    return f"{COLLECTION_NAME}_{session_id}"
+
+
+def _chroma_client() -> chromadb.PersistentClient:
+    return chromadb.PersistentClient(path=settings.chroma_persist_dir)
+
+
+def delete_session_collection(session_id: str) -> None:
+    """Remove a session index (fixes corrupted / wrong-embedding collections)."""
+    name = _collection_name(session_id)
+    try:
+        _chroma_client().delete_collection(name)
+    except Exception:
+        pass
+    _active_sessions.discard(session_id)
 
 
 def _metadata_doc_block(meta: VideoMetadata) -> str:
@@ -89,18 +110,17 @@ def build_documents(videos: list[VideoMetadata]) -> list[Document]:
 
 
 def ingest_videos(videos: list[VideoMetadata], session_id: str) -> dict[str, Any]:
-    """Replace collection for this session (namespace = session_id)."""
+    """Build a fresh Chroma collection for this session."""
     docs = build_documents(videos)
     if not docs:
         raise ValueError("No content to index — transcripts/metadata empty for both videos.")
 
-    embeddings = get_embeddings()
-    # session-scoped collection so multiple demos don't collide
-    collection = f"{COLLECTION_NAME}_{session_id}"
+    delete_session_collection(session_id)
 
+    collection = _collection_name(session_id)
     Chroma.from_documents(
         documents=docs,
-        embedding=embeddings,
+        embedding=get_embeddings(),
         collection_name=collection,
         persist_directory=settings.chroma_persist_dir,
     )
@@ -114,19 +134,26 @@ def ingest_videos(videos: list[VideoMetadata], session_id: str) -> dict[str, Any
 
 
 def session_exists(session_id: str) -> bool:
-    if session_id in _active_sessions:
-        return True
+    """True only if the collection exists and search works (not corrupt / empty)."""
+    name = _collection_name(session_id)
     try:
-        data = get_vectorstore(session_id).get()
-        return bool(data.get("ids"))
-    except Exception:
+        client = _chroma_client()
+        col = client.get_collection(name)
+        if col.count() < 1:
+            return False
+        store = get_vectorstore(session_id)
+        store.similarity_search("engagement rate", k=1)
+        _active_sessions.add(session_id)
+        return True
+    except Exception as e:
+        logger.debug("session_exists(%s) failed: %s", session_id, e)
+        _active_sessions.discard(session_id)
         return False
 
 
 def get_vectorstore(session_id: str) -> Chroma:
-    collection = f"{COLLECTION_NAME}_{session_id}"
     return Chroma(
-        collection_name=collection,
+        collection_name=_collection_name(session_id),
         embedding_function=get_embeddings(),
         persist_directory=settings.chroma_persist_dir,
     )

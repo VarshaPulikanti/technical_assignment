@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = "nomic-embed-text"
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-2.5-flash"
     chroma_persist_dir: str = "./data/chroma"
     chunk_size: int = 500
     chunk_overlap: int = 80

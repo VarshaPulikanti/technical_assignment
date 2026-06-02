@@ -69,13 +69,14 @@ def clear_history(session_id: str) -> None:
 
 
 def _build_rag_chain(session_id: str):
-    use_ollama = settings.llm_provider.lower() == "ollama"
-    k = 4 if use_ollama else 6
+    provider = settings.llm_provider.lower()
+    k = 4 if provider in ("ollama", "gemini") else 6
     retriever = get_vectorstore(session_id).as_retriever(search_kwargs={"k": k})
     llm = get_chat_llm()
     qa_chain = create_stuff_documents_chain(llm, QA_PROMPT)
 
-    if use_ollama:
+    # Single LLM call — saves Gemini/Ollama quota; chat_history still in QA prompt.
+    if provider in ("ollama", "gemini"):
         return create_retrieval_chain(retriever, qa_chain)
 
     history_aware = create_history_aware_retriever(llm, retriever, CONTEXTUALIZE_PROMPT)
@@ -153,9 +154,23 @@ async def stream_chat(session_id: str, message: str) -> AsyncGenerator[str, None
     except Exception as e:
         err = str(e)
         if "429" in err or "quota" in err.lower():
-            err = "OpenAI quota exceeded. Use Ollama in backend/.env or add billing."
+            prov = settings.llm_provider.lower()
+            if prov == "gemini":
+                err = (
+                    "Gemini API quota/rate limit hit. Wait 1–2 minutes and try again, "
+                    "or set GEMINI_MODEL=gemini-2.5-flash in backend/.env and restart backend."
+                )
+            elif prov == "openai":
+                err = "OpenAI quota exceeded — add billing or switch LLM_PROVIDER=gemini/ollama."
+            else:
+                err = "API rate limit exceeded. Wait a minute and retry."
         elif "allocate" in err.lower() or "terminated" in err.lower():
             err = "Ollama out of memory — Quit Ollama from system tray, reopen, retry."
+        elif "hnsw" in err.lower() or "nothing found on disk" in err.lower():
+            err = (
+                "Search index is broken (old/corrupt data). Click Analyze & Index again "
+                "and wait until chat is ready, then retry."
+            )
         yield json.dumps({"type": "error", "message": err}) + "\n"
         yield json.dumps({"type": "done"}) + "\n"
         return
